@@ -52,7 +52,8 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
   // Mirror of allLeads.length, kept in a ref so the poll can compare against it
   // without re-creating the interval on every list change.
   const countRef = useRef(0);
-  useEffect(() => { countRef.current = allLeads.length; }, [allLeads]);
+  const leadsRef = useRef<Lead[]>([]);
+  useEffect(() => { countRef.current = allLeads.length; leadsRef.current = allLeads; }, [allLeads]);
 
   // Last-seen follow-up bucket signature. The overdue/today/followup buckets are
   // derived from each lead's follow-up date, so a lead can move (followup→today
@@ -61,30 +62,81 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
   // the tab list (stale cached array) is empty.
   const bucketRef = useRef('');
 
-  // Full (lean) list fetch. The list endpoint omits formData, so this stays
-  // small even with ~18k leads. We only call it on first load and whenever the
-  // server-side count changes — NOT every 10s, which would re-download MBs.
-  const refresh = useCallback(async () => {
-    try {
-      const leads = await api.listLeads();
-      setAllLeads(leads);
-      countRef.current = leads.length;
-    } catch {
-      // Silent — keep showing the leads we already have.
-    } finally {
-      setLoading(false);
-    }
+  // Newest updatedAt we've seen + the local day of the last full load. Lets a
+  // change be synced with a small ?since= fetch instead of the full list.
+  const sinceRef = useRef('');
+  const loadedDayRef = useRef('');
+  // In-flight full load, so the first stats poll waits for it instead of
+  // starting a second multi-MB download in parallel.
+  const fullLoadRef = useRef<Promise<void> | null>(null);
+
+  const maxUpdatedAt = (leads: Lead[], start = '') =>
+    leads.reduce((m, l) => (l.updatedAt && l.updatedAt > m ? l.updatedAt : m), start);
+
+  // Full (lean) list fetch — ~27k leads, several MB. Only on first load, at a
+  // day change (follow-up buckets roll over) or when a delta can't reconcile.
+  const refresh = useCallback(() => {
+    if (fullLoadRef.current) return fullLoadRef.current;
+    fullLoadRef.current = (async () => {
+      try {
+        const leads = await api.listLeads();
+        setAllLeads(leads);
+        countRef.current = leads.length;
+        sinceRef.current = maxUpdatedAt(leads);
+        loadedDayRef.current = new Date().toDateString();
+      } catch {
+        // Silent — keep showing the leads we already have.
+      } finally {
+        setLoading(false);
+        fullLoadRef.current = null;
+      }
+    })();
+    return fullLoadRef.current;
   }, []);
 
-  // Cheap, authoritative counts. Also the new-lead detector: if the global total
-  // changed, re-fetch the (heavy) list once. Counts come from here — never from
-  // counting the in-memory array — so they're always correct even mid-load.
+  // Fetch only leads created/changed since the last sync and merge them in.
+  // Falls back to a full load if the result still doesn't match the server
+  // total (e.g. someone else deleted leads).
+  const syncChanges = useCallback(async (expectedTotal: number) => {
+    if (!sinceRef.current || loadedDayRef.current !== new Date().toDateString()) {
+      await refresh();
+      return;
+    }
+    try {
+      const changed = await api.listLeadsSince(sinceRef.current);
+      sinceRef.current = maxUpdatedAt(changed, sinceRef.current);
+      if (changed.length) {
+        const byId = new Map(changed.map((l) => [l.id, l]));
+        const updated = leadsRef.current.map((l) => {
+          const c = byId.get(l.id);
+          if (!c) return l;
+          byId.delete(l.id);
+          return { ...l, ...c };
+        });
+        const added = Array.from(byId.values()).sort((a, b) =>
+          String(b.createdAt).localeCompare(String(a.createdAt)),
+        );
+        const next = added.length ? [...added, ...updated] : updated;
+        leadsRef.current = next;
+        countRef.current = next.length;
+        setAllLeads(next);
+      }
+      if (countRef.current !== expectedTotal) await refresh();
+    } catch {
+      await refresh();
+    }
+  }, [refresh]);
+
+  // Cheap, authoritative counts. Also the change detector: if the global total
+  // or follow-up buckets changed, sync just the changed leads. Counts come from
+  // here — never from counting the in-memory array — so they're always correct.
   const loadStats = useCallback(async () => {
     try {
+      if (fullLoadRef.current) await fullLoadRef.current;
       const global = await api.getLeadStats();
       const bucketSig = `${global.overdue}-${global.today}-${global.followup}`;
       if (global.total !== countRef.current || bucketSig !== bucketRef.current) {
-        await refresh();
+        await syncChanges(global.total);
       }
       bucketRef.current = bucketSig;
       // Don't show counts until we know who's logged in, otherwise an employee
@@ -94,7 +146,7 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore transient errors (cold start / offline)
     }
-  }, [refresh, scopeArg, auth.role]);
+  }, [syncChanges, scopeArg, auth.role]);
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => { loadStats(); }, [loadStats]);

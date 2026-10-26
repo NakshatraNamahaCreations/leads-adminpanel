@@ -21,6 +21,13 @@ export async function listLeads(): Promise<Lead[]> {
   return data.data;
 }
 
+// Only the leads created/updated at or after `since` (ISO date). Used to pick up
+// new/changed leads without re-downloading the whole (multi-MB) list.
+export async function listLeadsSince(since: string): Promise<Lead[]> {
+  const data = await request<{ data: Lead[] }>(`/leads?since=${encodeURIComponent(since)}`);
+  return data.data;
+}
+
 // Full single lead (includes formData, which the list endpoint omits for size).
 // The detail view uses this so it can show every per-service form field.
 export async function getLead(id: string): Promise<Lead> {
