@@ -1,10 +1,15 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import ServiceWorkerRegister from '@/components/ServiceWorkerRegister';
 
 export const metadata: Metadata = {
-  title: 'Make My Documents CRM',
+  title: 'MMD CRM',
   description: 'Lead management dashboard for Make My Documents',
   manifest: '/manifest.json',
+  applicationName: 'MMD CRM',
+  icons: { icon: '/favicon.png', apple: '/apple-touch-icon.png' },
+  // iPhone "Add to Home Screen": open full-screen with this name
+  appleWebApp: { capable: true, title: 'MMD CRM', statusBarStyle: 'default' },
 };
 
 export const viewport: Viewport = {
@@ -18,7 +23,10 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="h-full">
-      <body className="h-full antialiased" suppressHydrationWarning>{children}</body>
+      <body className="h-full antialiased" suppressHydrationWarning>
+        <ServiceWorkerRegister />
+        {children}
+      </body>
     </html>
   );
 }

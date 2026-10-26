@@ -1,10 +1,12 @@
 {
-  "name": "MakeMyDocs CRM",
+  "id": "/",
+  "name": "MMD CRM",
   "short_name": "MMD CRM",
-  "description": "Lead management dashboard for MakeMyDocuments team",
+  "description": "Lead management dashboard for the Make My Documents team",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#f8fafc",
+  "background_color": "#ffffff",
   "theme_color": "#2563eb",
   "orientation": "portrait-primary",
   "icons": [
@@ -12,13 +14,19 @@
       "src": "/icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
       "src": "/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ],
   "categories": ["business", "productivity"]
