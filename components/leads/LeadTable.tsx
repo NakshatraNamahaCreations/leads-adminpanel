@@ -6,7 +6,7 @@ import { Search, Filter, Trash2, Download, CheckCircle } from 'lucide-react';
 import { Lead } from '@/lib/types';
 import { MOCK_USERS } from '@/lib/mockData';
 import * as api from '@/lib/api';
-import { SERVICES } from '@/lib/constants';
+import { SERVICES, VISA_COUNTRIES, isTouristVisa, visaCountryOf } from '@/lib/constants';
 import { formatDate } from '@/lib/format';
 import { useAddLead } from '@/context/AddLeadContext';
 import { useAuthUser } from '@/lib/useAuthUser';
@@ -36,6 +36,8 @@ export default function LeadTable({ leads }: Props) {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [paymentFilter, setPaymentFilter] = useState<string>('all');
   const [serviceFilter, setServiceFilter] = useState<string>('all');
+  // Second dropdown, shown only when Service = Tourist Visa.
+  const [visaCountryFilter, setVisaCountryFilter] = useState<string>('all');
   const [assignedFilter, setAssignedFilter] = useState<string>('all');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
@@ -154,8 +156,14 @@ export default function LeadTable({ leads }: Props) {
       const matchPayment =
       paymentFilter === 'all' || l.paymentStatus === paymentFilter;
 
+      // "Tourist Visa" covers every country's visa ("Dubai Tourist Visa", …),
+      // optionally narrowed to one country.
       const matchService =
-      serviceFilter === 'all' || l.service === serviceFilter;
+      serviceFilter === 'all' ||
+      (serviceFilter === 'Tourist Visa'
+        ? isTouristVisa(l.service) &&
+          (visaCountryFilter === 'all' || visaCountryOf(l) === visaCountryFilter)
+        : l.service === serviceFilter);
 
       const matchAssigned =
       assignedFilter === 'all' || l.assignedTo === assignedFilter;
@@ -190,7 +198,7 @@ export default function LeadTable({ leads }: Props) {
     if (firstFilterRender.current) { firstFilterRender.current = false; return; }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, paymentFilter, serviceFilter, assignedFilter]);
+  }, [search, paymentFilter, serviceFilter, visaCountryFilter, assignedFilter]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { setPage((p) => Math.min(p, Math.max(1, totalPages))); }, [totalPages]);
 
@@ -246,7 +254,7 @@ export default function LeadTable({ leads }: Props) {
     {/* SERVICE FILTER */}
     <select
     value={serviceFilter}
-    onChange={(e) => setServiceFilter(e.target.value)}
+    onChange={(e) => { setServiceFilter(e.target.value); setVisaCountryFilter('all'); }}
     className="w-full sm:w-auto min-w-0 px-3 py-2.5 border border-gray-200 rounded-xl bg-gray-50 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
     >
     <option value="all">All Services</option>
@@ -254,6 +262,20 @@ export default function LeadTable({ leads }: Props) {
       <option key={s} value={s}>{s}</option>
     ))}
     </select>
+
+    {/* VISA COUNTRY FILTER — only for Tourist Visa */}
+    {serviceFilter === 'Tourist Visa' && (
+      <select
+      value={visaCountryFilter}
+      onChange={(e) => setVisaCountryFilter(e.target.value)}
+      className="w-full sm:w-auto min-w-0 px-3 py-2.5 border border-gray-200 rounded-xl bg-gray-50 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      >
+      <option value="all">All Countries</option>
+      {VISA_COUNTRIES.map((c) => (
+        <option key={c} value={c}>{c} Tourist Visa</option>
+      ))}
+      </select>
+    )}
 
     {/* ASSIGNED TO FILTER */}
     <select

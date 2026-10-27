@@ -16,6 +16,35 @@ export const SERVICES = [
   'Affidavits / Annexure',
 ];
 
+// The website's 16 visa forms save the country inside the service name, e.g.
+// "Dubai Tourist Visa". Older/imported leads say just "Tourist Visa" and keep
+// the country in `applyingFor`. Used for the Tourist Visa → country filter.
+export const VISA_COUNTRIES = [
+  'Australia', 'Azerbaijan', 'Bahrain', 'Dubai', 'Egypt', 'Hong Kong',
+  'Indonesia', 'Malaysia', 'Morocco', 'Oman', 'Qatar', 'Russia',
+  'Singapore', 'UK', 'Uzbekistan', 'Vietnam',
+];
+
+const VISA_COUNTRY_ALIASES: Record<string, string> = {
+  'united arab emirates': 'Dubai',
+  'united arab emirated': 'Dubai',
+  uae: 'Dubai',
+  'united kingdom': 'UK',
+};
+
+export const isTouristVisa = (service?: string) => /tourist visa$/i.test(String(service || '').trim());
+
+// Country of a tourist-visa lead ('' if unknown or not a visa lead).
+export function visaCountryOf(lead: { service?: string; applyingFor?: string }): string {
+  const service = String(lead.service || '').trim();
+  if (!isTouristVisa(service)) return '';
+  const raw = service.replace(/\s*tourist visa$/i, '').trim() || String(lead.applyingFor || '').trim();
+  if (!raw) return '';
+  const alias = VISA_COUNTRY_ALIASES[raw.toLowerCase()];
+  if (alias) return alias;
+  return VISA_COUNTRIES.find((c) => c.toLowerCase() === raw.toLowerCase()) || raw;
+}
+
 // Indian states + UTs — used in Team Settings to scope which states a team
 // member handles (for state-based auto-assignment of new leads).
 export const STATES = [
