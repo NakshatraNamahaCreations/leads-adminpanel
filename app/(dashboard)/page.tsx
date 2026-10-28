@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 
 import { useAuthUser } from '@/lib/useAuthUser';
+import * as api from '@/lib/api';
 
 import BarChart from '@/components/dashboard/BarChart';
 import DonutChart from '@/components/dashboard/DonutChart';
@@ -119,24 +120,43 @@ export default function DashboardPage() {
   const [catFrom, setCatFrom] = useState('');
   const [catTo, setCatTo] = useState('');
 
+  // Chart data is aggregated on the server (the in-memory list only holds the
+  // open leads). Employees see only their own leads.
+  const chartScope = user.role && user.role !== 'admin' ? user.name : undefined;
+
   // Conversion rate per service, optionally limited to a custom date range.
-  const categoryData = useMemo(() => {
-    const fromT = catFrom ? new Date(catFrom + 'T00:00:00').getTime() : -Infinity;
-    const toT = catTo ? new Date(catTo + 'T23:59:59').getTime() : Infinity;
-    const serviceStats: Record<string, { count: number; converted: number }> = {};
-    leads.forEach((l) => {
-      const t = new Date(l.createdAt).getTime();
-      if (t < fromT || t > toT) return;
-      if (!serviceStats[l.service]) serviceStats[l.service] = { count: 0, converted: 0 };
-      serviceStats[l.service].count++;
-      if (l.status === 'converted') serviceStats[l.service].converted++;
-    });
-    return Object.entries(serviceStats).map(([name, s]) => ({
-      name,
-      count: s.count,
-      converted: s.converted,
-    }));
-  }, [leads, catFrom, catTo]);
+  const [categoryData, setCategoryData] = useState<{ name: string; count: number; converted: number }[]>([]);
+  useEffect(() => {
+    if (!user.role) return;
+    let active = true;
+    api.getServiceStats({ from: catFrom || undefined, to: catTo || undefined, assignedTo: chartScope })
+      .then((rows) => { if (active) setCategoryData(rows); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [user.role, chartScope, catFrom, catTo]);
+
+  // Leads created per day ("YYYY-MM-DD" → count), for the overview bars.
+  const [dailyCounts, setDailyCounts] = useState<{ d: string; n: number }[]>([]);
+  useEffect(() => {
+    if (!user.role) return;
+    let active = true;
+    api.getDailyCounts(chartScope)
+      .then((rows) => { if (active) setDailyCounts(rows); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [user.role, chartScope]);
+  const { byDay, byMonth } = useMemo(() => {
+    const day = new Map<string, number>();
+    const month = new Map<string, number>();
+    for (const { d, n } of dailyCounts) {
+      day.set(d, n);
+      month.set(d.slice(0, 7), (month.get(d.slice(0, 7)) || 0) + n);
+    }
+    return { byDay: day, byMonth: month };
+  }, [dailyCounts]);
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const countDay = (d: Date) => byDay.get(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`) || 0;
+  const countMonth = (y: number, m: number) => byMonth.get(`${y}-${pad2(m + 1)}`) || 0;
 
   // Close the range dropdown on outside click.
   useEffect(() => {
@@ -156,14 +176,10 @@ export default function DashboardPage() {
       const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);
       return Array.from({ length: 30 }, (_, i) => {
         const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
-        const next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
         return {
           label: String(d.getDate()),
           tip: `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`,
-          value: leads.filter((l) => {
-            const t = new Date(l.createdAt).getTime();
-            return t >= d.getTime() && t < next.getTime();
-          }).length,
+          value: countDay(d),
         };
       });
     }
@@ -179,14 +195,10 @@ export default function DashboardPage() {
       if (spanDays <= 62) {
         return Array.from({ length: spanDays }, (_, i) => {
           const d = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i);
-          const next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
           return {
             label: String(d.getDate()),
             tip: `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`,
-            value: leads.filter((l) => {
-              const t = new Date(l.createdAt).getTime();
-              return t >= d.getTime() && t < next.getTime();
-            }).length,
+            value: countDay(d),
           };
         });
       }
@@ -201,10 +213,7 @@ export default function DashboardPage() {
       return buckets.map((b) => ({
         label: `${MONTHS[b.m]} '${String(b.y).slice(2)}`,
         tip: `${MONTHS[b.m]} ${b.y}`,
-        value: leads.filter((l) => {
-          const c = new Date(l.createdAt);
-          return c.getFullYear() === b.y && c.getMonth() === b.m;
-        }).length,
+        value: countMonth(b.y, b.m),
       }));
     }
 
@@ -213,10 +222,7 @@ export default function DashboardPage() {
       return MONTHS.map((label, m) => ({
         label,
         tip: `${label} ${now.getFullYear()}`,
-        value: leads.filter((l) => {
-          const c = new Date(l.createdAt);
-          return c.getFullYear() === now.getFullYear() && c.getMonth() === m;
-        }).length,
+        value: countMonth(now.getFullYear(), m),
       }));
     }
 
@@ -227,8 +233,7 @@ export default function DashboardPage() {
     else if (range === '6m') monthsBack = 6;
     else if (range === '12m') monthsBack = 12;
     else {
-      const times = leads.map((l) => new Date(l.createdAt).getTime()).filter((t) => !isNaN(t));
-      const earliest = times.length ? new Date(Math.min(...times)) : now;
+      const earliest = dailyCounts.length ? new Date(dailyCounts[0].d + 'T00:00:00') : now;
       monthsBack =
         (now.getFullYear() - earliest.getFullYear()) * 12 +
         (now.getMonth() - earliest.getMonth()) + 1;
@@ -244,13 +249,11 @@ export default function DashboardPage() {
         // and always in the tooltip.
         label: monthsBack > 12 ? `${MONTHS[m]} '${String(y).slice(2)}` : MONTHS[m],
         tip: `${MONTHS[m]} ${y}`,
-        value: leads.filter((l) => {
-          const c = new Date(l.createdAt);
-          return c.getFullYear() === y && c.getMonth() === m;
-        }).length,
+        value: countMonth(y, m),
       };
     });
-  }, [leads, range, customFrom, customTo]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [byDay, byMonth, dailyCounts, range, customFrom, customTo]);
 
   const rangeSubtitle =
     range === 'custom' ? (customFrom && customTo ? `Lead activity — ${customFrom} to ${customTo}` : 'Pick a start and end date')

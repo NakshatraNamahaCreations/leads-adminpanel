@@ -5,19 +5,28 @@ import type { Lead } from '@/lib/types';
 import * as api from '@/lib/api';
 import { useAuthUser } from '@/lib/useAuthUser';
 
+// The context holds only the OPEN leads (everything except converted/dead —
+// a few hundred rows). Converted/dead are paged from the server by their own
+// tabs, and the dashboard charts / header search query the server, so the
+// panel never downloads all ~28k leads.
+const CLOSED_STATUSES = ['converted', 'dead'];
+
 interface AddLeadContextType {
   open: boolean;
   openModal: () => void;
   closeModal: () => void;
   leads: Lead[];
   loading: boolean;
-  // Authoritative counts from the server (accurate regardless of the in-memory
-  // list, which can be large/slow to load). Null until first fetched.
+  // Authoritative counts from the server (the in-memory list only has the
+  // open leads). Null until first fetched.
   stats: api.LeadStats | null;
   addLead: (lead: Lead) => void;
   updateLead: (id: string, updates: Partial<Lead>) => void;
   deleteLead: (id: string) => void;
   addNote: (id: string, text: string, author?: string) => void;
+  // Add a lead fetched on its own (e.g. a dead lead opened from its server-
+  // paged tab or the header search) so the detail view can use it.
+  rememberLead: (lead: Lead) => void;
   refresh: () => void;
   // Re-fetch the authoritative counts immediately (e.g. right after a delete)
   // so the sidebar/dashboard numbers update without waiting for the 10s poll.
@@ -35,6 +44,7 @@ const AddLeadContext = createContext<AddLeadContextType>({
   updateLead: () => {},
   deleteLead: () => {},
   addNote: () => {},
+  rememberLead: () => {},
   refresh: () => {},
   reloadStats: () => {},
 });
@@ -49,96 +59,44 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
   // Employees see only their own counts; admins see the whole pipeline.
   const scopeArg = auth.role && auth.role !== 'admin' ? auth.name : undefined;
 
-  // Mirror of allLeads.length, kept in a ref so the poll can compare against it
-  // without re-creating the interval on every list change.
-  const countRef = useRef(0);
-  const leadsRef = useRef<Lead[]>([]);
-  useEffect(() => { countRef.current = allLeads.length; leadsRef.current = allLeads; }, [allLeads]);
+  // Closed leads opened individually (see rememberLead). Kept across refreshes
+  // so an open detail view doesn't lose its lead when the open list reloads.
+  const closedExtrasRef = useRef<Map<string, Lead>>(new Map());
+  const trackClosed = (lead: Lead) => {
+    if (CLOSED_STATUSES.includes(lead.status)) closedExtrasRef.current.set(lead.id, lead);
+    else closedExtrasRef.current.delete(lead.id);
+  };
 
-  // Last-seen follow-up bucket signature. The overdue/today/followup buckets are
-  // derived from each lead's follow-up date, so a lead can move (followup→today
-  // →overdue, e.g. at midnight) WITHOUT the total changing. We must re-fetch the
-  // list then too — otherwise the tab count (from fresh stats) shows leads but
-  // the tab list (stale cached array) is empty.
-  const bucketRef = useRef('');
-
-  // Newest updatedAt we've seen + the local day of the last full load. Lets a
-  // change be synced with a small ?since= fetch instead of the full list.
-  const sinceRef = useRef('');
-  const loadedDayRef = useRef('');
-  // In-flight full load, so the first stats poll waits for it instead of
-  // starting a second multi-MB download in parallel.
-  const fullLoadRef = useRef<Promise<void> | null>(null);
-
-  const maxUpdatedAt = (leads: Lead[], start = '') =>
-    leads.reduce((m, l) => (l.updatedAt && l.updatedAt > m ? l.updatedAt : m), start);
-
-  // Full (lean) list fetch — ~27k leads, several MB. Only on first load, at a
-  // day change (follow-up buckets roll over) or when a delta can't reconcile.
+  // Fetch the open leads (~20 KB). Shared while in flight.
+  const loadRef = useRef<Promise<void> | null>(null);
   const refresh = useCallback(() => {
-    if (fullLoadRef.current) return fullLoadRef.current;
-    fullLoadRef.current = (async () => {
+    if (loadRef.current) return loadRef.current;
+    loadRef.current = (async () => {
       try {
-        const leads = await api.listLeads();
-        setAllLeads(leads);
-        countRef.current = leads.length;
-        sinceRef.current = maxUpdatedAt(leads);
-        loadedDayRef.current = new Date().toDateString();
+        const active = await api.listActiveLeads();
+        const ids = new Set(active.map((l) => l.id));
+        const extras = Array.from(closedExtrasRef.current.values()).filter((l) => !ids.has(l.id));
+        setAllLeads([...active, ...extras]);
       } catch {
         // Silent — keep showing the leads we already have.
       } finally {
         setLoading(false);
-        fullLoadRef.current = null;
+        loadRef.current = null;
       }
     })();
-    return fullLoadRef.current;
+    return loadRef.current;
   }, []);
 
-  // Fetch only leads created/changed since the last sync and merge them in.
-  // Falls back to a full load if the result still doesn't match the server
-  // total (e.g. someone else deleted leads).
-  const syncChanges = useCallback(async (expectedTotal: number) => {
-    if (!sinceRef.current || loadedDayRef.current !== new Date().toDateString()) {
-      await refresh();
-      return;
-    }
-    try {
-      const changed = await api.listLeadsSince(sinceRef.current);
-      sinceRef.current = maxUpdatedAt(changed, sinceRef.current);
-      if (changed.length) {
-        const byId = new Map(changed.map((l) => [l.id, l]));
-        const updated = leadsRef.current.map((l) => {
-          const c = byId.get(l.id);
-          if (!c) return l;
-          byId.delete(l.id);
-          return { ...l, ...c };
-        });
-        const added = Array.from(byId.values()).sort((a, b) =>
-          String(b.createdAt).localeCompare(String(a.createdAt)),
-        );
-        const next = added.length ? [...added, ...updated] : updated;
-        leadsRef.current = next;
-        countRef.current = next.length;
-        setAllLeads(next);
-      }
-      if (countRef.current !== expectedTotal) await refresh();
-    } catch {
-      await refresh();
-    }
-  }, [refresh]);
-
-  // Cheap, authoritative counts. Also the change detector: if the global total
-  // or follow-up buckets changed, sync just the changed leads. Counts come from
-  // here — never from counting the in-memory array — so they're always correct.
+  // Cheap, authoritative counts. Also the change detector: any change in the
+  // counts (a new lead, a status change, follow-up buckets rolling over at
+  // midnight) re-fetches the small open-leads list.
+  const statsSigRef = useRef('');
   const loadStats = useCallback(async () => {
     try {
-      if (fullLoadRef.current) await fullLoadRef.current;
       const global = await api.getLeadStats();
-      const bucketSig = `${global.overdue}-${global.today}-${global.followup}`;
-      if (global.total !== countRef.current || bucketSig !== bucketRef.current) {
-        await syncChanges(global.total);
-      }
-      bucketRef.current = bucketSig;
+      const sig = JSON.stringify(global);
+      if (statsSigRef.current && sig !== statsSigRef.current) await refresh();
+      statsSigRef.current = sig;
       // Don't show counts until we know who's logged in, otherwise an employee
       // briefly sees the admin's (global) numbers before auth finishes loading.
       if (!auth.role) { setStats(null); return; }
@@ -146,7 +104,7 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore transient errors (cold start / offline)
     }
-  }, [syncChanges, scopeArg, auth.role]);
+  }, [refresh, scopeArg, auth.role]);
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => { loadStats(); }, [loadStats]);
@@ -185,6 +143,7 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
     setAllLeads((prev) => prev.map((l) => (l.id === id ? { ...l, ...updates } : l)));
     try {
       const saved = await api.updateLead(id, updates);
+      trackClosed(saved);
       setAllLeads((prev) => prev.map((l) => (l.id === id ? saved : l)));
     } catch (err) {
       console.error('Failed to update lead:', err);
@@ -194,6 +153,7 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
 
   const deleteLead = async (id: string) => {
     setAllLeads((prev) => prev.filter((l) => l.id !== id));
+    closedExtrasRef.current.delete(id);
     try {
       await api.deleteLead(id);
     } catch (err) {
@@ -208,12 +168,19 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
   const addNote = async (id: string, text: string, author = 'Admin') => {
     try {
       const saved = await api.addLeadNote(id, text, author);
+      trackClosed(saved);
       setAllLeads((prev) => prev.map((l) => (l.id === id ? saved : l)));
     } catch (err) {
       console.error('Failed to add note:', err);
       refresh();
     }
   };
+
+  const rememberLead = useCallback((lead: Lead) => {
+    trackClosed(lead);
+    setAllLeads((prev) => (prev.some((l) => l.id === lead.id) ? prev : [lead, ...prev]));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Until auth loads (role === ''), show NOTHING — otherwise an employee
   // flashes the full admin list for a moment. Admin → everything;
@@ -236,6 +203,7 @@ export function AddLeadProvider({ children }: { children: React.ReactNode }) {
       updateLead,
       deleteLead,
       addNote,
+      rememberLead,
       refresh,
       reloadStats: loadStats,
     }}>

@@ -4,6 +4,8 @@ import { useState, useRef, useEffect } from 'react';
 import { Search, Bell, Menu, ChevronDown, LogOut, UserCircle } from 'lucide-react';
 import { useAuthUser } from '@/lib/useAuthUser';
 import { useAddLead } from '@/context/AddLeadContext';
+import * as api from '@/lib/api';
+import type { Lead } from '@/lib/types';
 import Link from 'next/link';
 import ProfileModal from './ProfileModal';
 import NotificationsModal from './NotificationsModal';
@@ -110,18 +112,24 @@ export default function Header({ onMenuToggle }: { onMenuToggle?: () => void }) 
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
   });
 
-  const results = search.length > 1
-    ? leads.filter((l) => {
-        const q = search.toLowerCase();
-        return (
-          l.name.toLowerCase().includes(q) ||
-          l.mobileNumber.includes(search) ||
-          (l.orderId && l.orderId.toLowerCase().includes(q)) ||
-          (l.service && l.service.toLowerCase().includes(q)) ||
-          (l.email && l.email.toLowerCase().includes(q))
-        );
-      }).slice(0, 5)
-    : [];
+  // Searched on the server across ALL leads (the in-memory list only has the
+  // open ones), 300ms after typing stops. Employees only find their own leads.
+  const [results, setResults] = useState<Lead[]>([]);
+  const [searching, setSearching] = useState(false);
+  const searchScope = user.role && user.role !== 'admin' ? user.name : undefined;
+  useEffect(() => {
+    const q = search.trim();
+    if (q.length < 2) { setResults([]); setSearching(false); return; }
+    let active = true;
+    setSearching(true);
+    const t = setTimeout(() => {
+      api.searchLeads(q, 5, searchScope)
+        .then((r) => { if (active) setResults(r); })
+        .catch(() => { if (active) setResults([]); })
+        .finally(() => { if (active) setSearching(false); });
+    }, 300);
+    return () => { active = false; clearTimeout(t); };
+  }, [search, searchScope]);
 
   const notifications = [
     ...leads
@@ -201,7 +209,7 @@ export default function Header({ onMenuToggle }: { onMenuToggle?: () => void }) 
           )}
           {showResults && search.length > 1 && results.length === 0 && (
             <div className="absolute top-full left-0 right-0 mt-2 bg-white rounded-2xl border border-gray-100 shadow-xl overflow-hidden z-50">
-              <p className="px-4 py-3 text-sm text-gray-400 text-center">No leads found</p>
+              <p className="px-4 py-3 text-sm text-gray-400 text-center">{searching ? 'Searching…' : 'No leads found'}</p>
             </div>
           )}
         </div>

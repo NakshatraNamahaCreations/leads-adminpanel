@@ -914,14 +914,28 @@ export default function LeadViewPageClient() {
   // works on any static host — no host-specific rewrites needed.
   const sp = useSearchParams();
   const id = sp.get('id') ?? '';
-  const { leads, loading } = useAddLead();
+  const { leads, loading, rememberLead } = useAddLead();
   const lead = leads.find((l) => l.id === id);
+
+  // Converted/dead leads aren't in the in-memory list until the full list has
+  // downloaded (those tabs page on the server), so fetch this one directly.
+  const [fetchState, setFetchState] = useState<'idle' | 'loading' | 'missing'>('idle');
+  const found = !!lead;
+  useEffect(() => {
+    if (found || loading || !id) return;
+    let active = true;
+    setFetchState('loading');
+    api.getLead(id)
+      .then((l) => { if (active) { rememberLead(l); setFetchState('idle'); } })
+      .catch(() => { if (active) setFetchState('missing'); });
+    return () => { active = false; };
+  }, [found, loading, id, rememberLead]);
 
   // On a hard refresh the lead list is still being fetched from the backend, so
   // wait for it before deciding the lead doesn't exist — otherwise the page
   // would 404 every time it's reloaded.
   if (!lead) {
-    if (loading) {
+    if (loading || fetchState !== 'missing') {
       return (
         <div className="flex items-center justify-center py-32">
           <div className="w-8 h-8 border-2 border-blue-200 border-t-blue-600 rounded-full animate-spin" />

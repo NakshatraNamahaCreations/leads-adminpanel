@@ -35,9 +35,11 @@ export default function LeadStatusPageClient({ params }: { params: Promise<{ sta
   if (!VALID.includes(status as LeadStatus)) notFound();
 
   const s = status as LeadStatus;
-  const leads = allLeads.filter((lead) => lead.status === s);
-  // Header count comes from the authoritative server stats (the list fills in
-  // from the in-memory leads, which match once fully loaded).
+  // Converted/dead hold ~99% of all leads, so those tabs page on the server;
+  // the open tabs filter the in-memory list.
+  const serverStatus = s === 'converted' || s === 'dead' ? s : undefined;
+  const leads = serverStatus ? [] : allLeads.filter((lead) => lead.status === s);
+  // Header count comes from the authoritative server stats.
   const count = stats ? stats[s] : leads.length;
   const cfg = STATUS_CONFIG[s];
   const meta = STATUS_META[s];
@@ -63,7 +65,8 @@ export default function LeadStatusPageClient({ params }: { params: Promise<{ sta
         </span>
       </div>
 
-      <LeadTable leads={leads} />
+      {/* key: remount on tab switch so filters/page don't carry across tabs */}
+      <LeadTable key={s} leads={leads} serverStatus={serverStatus} />
     </div>
   );
 }

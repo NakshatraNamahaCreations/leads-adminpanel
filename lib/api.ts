@@ -16,15 +16,74 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return data as T;
 }
 
-export async function listLeads(): Promise<Lead[]> {
-  const data = await request<{ data: Lead[] }>('/leads');
+// Only open leads (everything except dead/converted) — a few hundred rows, so
+// the panel can render its working lists before the full list arrives.
+export async function listActiveLeads(): Promise<Lead[]> {
+  const data = await request<{ data: Lead[] }>('/leads?active=1');
   return data.data;
 }
 
-// Only the leads created/updated at or after `since` (ISO date). Used to pick up
-// new/changed leads without re-downloading the whole (multi-MB) list.
-export async function listLeadsSince(since: string): Promise<Lead[]> {
-  const data = await request<{ data: Lead[] }>(`/leads?since=${encodeURIComponent(since)}`);
+export interface LeadPageQuery {
+  status: 'converted' | 'dead';
+  page?: number;
+  limit?: number;
+  search?: string;
+  payment?: string;
+  service?: string;
+  country?: string;
+  assignedTo?: string;
+  sort?: string;
+  dir?: 'asc' | 'desc';
+  // Every match instead of one page (CSV export).
+  all?: boolean;
+}
+
+export interface LeadPage {
+  total: number;
+  data: Lead[];
+  // Distinct assignees in this status (for the staff filter).
+  assignees: string[];
+}
+
+// One server-filtered page of a closed tab (converted/dead). Those tabs hold
+// ~27k leads, so they're paged on the server rather than loaded whole.
+export async function listLeadsPage(query: LeadPageQuery): Promise<LeadPage> {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(query)) {
+    if (v === undefined || v === '' || v === false) continue;
+    qs.set(k, v === true ? '1' : String(v));
+  }
+  return request<LeadPage>(`/leads/page?${qs}`);
+}
+
+// Header search: the top few matches across ALL leads (name, mobile, order id,
+// email, service), searched on the server.
+export async function searchLeads(q: string, limit = 5, assignedTo?: string): Promise<Lead[]> {
+  const qs = new URLSearchParams({ search: q, limit: String(limit) });
+  if (assignedTo) qs.set('assignedTo', assignedTo);
+  const data = await request<{ data: Lead[] }>(`/leads?${qs}`);
+  return data.data;
+}
+
+// Dashboard chart data, aggregated on the server.
+// Leads created per IST day ("YYYY-MM-DD").
+export async function getDailyCounts(assignedTo?: string): Promise<{ d: string; n: number }[]> {
+  const qs = assignedTo ? `?assignedTo=${encodeURIComponent(assignedTo)}` : '';
+  const data = await request<{ data: { d: string; n: number }[] }>(`/leads/daily-counts${qs}`);
+  return data.data;
+}
+
+// Leads + conversions per service, optionally within a date range.
+export async function getServiceStats(
+  opts: { from?: string; to?: string; assignedTo?: string } = {},
+): Promise<{ name: string; count: number; converted: number }[]> {
+  const qs = new URLSearchParams();
+  if (opts.from) qs.set('from', opts.from);
+  if (opts.to) qs.set('to', opts.to);
+  if (opts.assignedTo) qs.set('assignedTo', opts.assignedTo);
+  const data = await request<{ data: { name: string; count: number; converted: number }[] }>(
+    `/leads/service-stats?${qs}`,
+  );
   return data.data;
 }
 

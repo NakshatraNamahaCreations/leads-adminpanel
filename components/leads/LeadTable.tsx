@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { Search, Filter, Trash2, Download, CheckCircle } from 'lucide-react';
 import { Lead } from '@/lib/types';
@@ -17,10 +17,14 @@ import Pagination from '../Pagination';
 const PAGE_SIZE = 10;
 
 interface Props {
-  leads: Lead[];
+  leads?: Lead[];
+  // Set for the converted/dead tabs (~27k leads): rows are fetched one page at
+  // a time from the server, with filters/sort applied there, instead of
+  // filtering `leads` in the browser.
+  serverStatus?: 'converted' | 'dead';
 }
 
-export default function LeadTable({ leads }: Props) {
+export default function LeadTable({ leads = [], serverStatus }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -126,10 +130,68 @@ export default function LeadTable({ leads }: Props) {
     // Update the sidebar/dashboard counts immediately (the rows are already
     // gone via the optimistic removal above), then show a success modal.
     reloadStats();
+    if (serverStatus) setReloadKey((k) => k + 1);
     setDeleteSuccess(ids.length);
   };
 
-  const assignedUsers = [...new Set(leads.map((l) => l.assignedTo))];
+  // ── Server-paged mode (serverStatus set) ──
+  const [serverRows, setServerRows] = useState<Lead[]>([]);
+  const [serverTotal, setServerTotal] = useState(0);
+  const [serverAssignees, setServerAssignees] = useState<string[]>([]);
+  const [serverLoading, setServerLoading] = useState(false);
+  const [serverLoaded, setServerLoaded] = useState(false);
+  const [serverError, setServerError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [exporting, setExporting] = useState(false);
+  // Don't hit the server on every keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Employees only ever see their own leads (same rule as the context list).
+  const scopeAssignee = auth.role && !isAdmin ? auth.name : undefined;
+  const serverQuery = useMemo<api.LeadPageQuery | null>(() => {
+    if (!serverStatus || !auth.role) return null;
+    return {
+      status: serverStatus,
+      search: debouncedSearch.trim(),
+      payment: paymentFilter === 'all' ? undefined : paymentFilter,
+      service: serviceFilter === 'all' ? undefined : serviceFilter,
+      country: serviceFilter === 'Tourist Visa' && visaCountryFilter !== 'all' ? visaCountryFilter : undefined,
+      assignedTo: scopeAssignee ?? (assignedFilter === 'all' ? undefined : assignedFilter),
+      sort: String(sortKey),
+      dir: sortDir,
+    };
+  }, [serverStatus, auth.role, scopeAssignee, debouncedSearch, paymentFilter, serviceFilter, visaCountryFilter, assignedFilter, sortKey, sortDir]);
+
+  useEffect(() => {
+    if (!serverQuery) return;
+    let active = true;
+    setServerLoading(true);
+    api.listLeadsPage({ ...serverQuery, page, limit: PAGE_SIZE })
+      .then((r) => {
+        if (!active) return;
+        setServerRows(r.data);
+        setServerTotal(r.total);
+        setServerAssignees(r.assignees);
+        setServerError(false);
+        setServerLoaded(true);
+      })
+      .catch(() => { if (active) setServerError(true); })
+      .finally(() => { if (active) setServerLoading(false); });
+    return () => { active = false; };
+  }, [serverQuery, page, reloadKey]);
+
+  // Assign from the table. In server mode the rows live here, not in the
+  // context list, so patch them too.
+  const assignLead = (id: string, assignedTo: string) => {
+    updateLead(id, { assignedTo });
+    if (serverStatus) setServerRows((rows) => rows.map((l) => (l.id === id ? { ...l, assignedTo } : l)));
+  };
+
+  const assignedUsers = serverStatus ? serverAssignees : [...new Set(leads.map((l) => l.assignedTo))];
 
   // Options for a lead's assign dropdown. Always include the lead's CURRENT
   // assignee even if they're not in the employee list (e.g. names carried over
@@ -139,12 +201,19 @@ export default function LeadTable({ leads }: Props) {
       ? [current, ...employees]
       : employees;
 
+  // What to show when there are no rows (server mode may still be fetching).
+  const emptyMessage = serverStatus && serverError
+    ? "Couldn't load leads — check the connection and reload."
+    : serverStatus && (serverLoading || !serverLoaded)
+      ? 'Loading leads…'
+      : null;
+
   const handleSort = (key: keyof Lead) => {
     if (sortKey === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
     else { setSortKey(key); setSortDir('asc'); }
   };
 
-  const filtered = leads
+  const filtered = serverStatus ? serverRows : leads
     .filter((l) => {
       const q = search.toLowerCase();
       const matchSearch =
@@ -188,8 +257,10 @@ export default function LeadTable({ leads }: Props) {
       return sortDir === 'asc' ? cmp : -cmp;
     });
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  // In server mode `filtered` is already just the current page.
+  const filteredTotal = serverStatus ? serverTotal : filtered.length;
+  const totalPages = Math.max(1, Math.ceil(filteredTotal / PAGE_SIZE));
+  const pageItems = serverStatus ? serverRows : filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   // Reset to page 1 when the user actively changes a filter — but NOT on the
   // initial mount (otherwise we'd trample the page restored from the URL).
@@ -199,16 +270,34 @@ export default function LeadTable({ leads }: Props) {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, paymentFilter, serviceFilter, visaCountryFilter, assignedFilter]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { setPage((p) => Math.min(p, Math.max(1, totalPages))); }, [totalPages]);
+  // (In server mode, wait for the first page so a ?page= restored from the URL
+  // isn't clamped to 1 before the total is known.)
+  useEffect(() => {
+    if (serverStatus && !serverLoaded) return;
+    setPage((p) => Math.min(p, Math.max(1, totalPages)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalPages, serverLoaded]);
 
 
   // Download the currently filtered leads as a CSV (opens in Excel/Sheets).
-  const exportCsv = () => {
+  // In server mode, fetch every match (not just the visible page) first.
+  const exportCsv = async () => {
+    let rows = filtered;
+    if (serverQuery) {
+      setExporting(true);
+      try {
+        rows = (await api.listLeadsPage({ ...serverQuery, all: true })).data;
+      } catch {
+        alert('Export failed — please try again.');
+        return;
+      } finally {
+        setExporting(false);
+      }
+    }
     const headers = ['Date', 'Name', 'Mobile', 'Email', 'District', 'Service', 'Amount', 'Payment', 'Status', 'Assigned To'];
     const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const lines = [headers.join(',')];
-    for (const l of filtered) {
+    for (const l of rows) {
       lines.push([
         l.date, l.name, l.mobileNumber, l.email, l.district, l.service,
         l.amount, l.paymentStatus, l.status, l.assignedTo,
@@ -310,11 +399,12 @@ export default function LeadTable({ leads }: Props) {
     {/* EXPORT — downloads the currently filtered leads as CSV */}
     <button
       onClick={exportCsv}
+      disabled={exporting}
       title="Export these leads to CSV"
-      className="w-full sm:w-auto justify-center flex items-center gap-1.5 px-3 py-2.5 border border-blue-600 rounded-xl bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
+      className="w-full sm:w-auto justify-center flex items-center gap-1.5 px-3 py-2.5 border border-blue-600 rounded-xl bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 transition-colors disabled:opacity-60"
     >
       <Download className="w-4 h-4 text-white" />
-      Export
+      {exporting ? 'Exporting…' : 'Export'}
     </button>
 
 </div>
@@ -337,7 +427,9 @@ export default function LeadTable({ leads }: Props) {
       {/* Table count */}
       <div className="px-4 py-2.5 bg-gray-50/50 border-b border-gray-50">
         <p className="text-xs text-gray-500 font-medium">
-          Showing {filtered.length} of {leads.length} leads
+          {serverStatus
+            ? `${serverTotal} lead${serverTotal !== 1 ? 's' : ''}${serverLoading ? ' · loading…' : ''}`
+            : `Showing ${filtered.length} of ${leads.length} leads`}
         </p>
       </div>
 
@@ -372,7 +464,7 @@ export default function LeadTable({ leads }: Props) {
             {filtered.length === 0 ? (
               <tr>
                 <td colSpan={mayDelete ? 10 : 9} className="px-4 py-12 text-center text-gray-400 text-sm">
-                  No leads found matching your search.
+                  {emptyMessage ?? 'No leads found matching your search.'}
                 </td>
               </tr>
             ) : (
@@ -421,7 +513,7 @@ export default function LeadTable({ leads }: Props) {
                     {isAdmin ? (
                       <select
                         value={lead.assignedTo || 'Unassigned'}
-                        onChange={(e) => updateLead(lead.id, { assignedTo: e.target.value })}
+                        onChange={(e) => assignLead(lead.id, e.target.value)}
                         className="text-xs border border-gray-200 rounded-lg px-1.5 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 cursor-pointer max-w-[8rem]"
                       >
                         <option value="Unassigned">Select assigned user</option>
@@ -446,7 +538,7 @@ export default function LeadTable({ leads }: Props) {
       {/* Mobile Cards */}
       <div className="md:hidden divide-y divide-gray-50">
         {filtered.length === 0 ? (
-          <div className="px-4 py-12 text-center text-gray-400 text-sm">No leads found.</div>
+          <div className="px-4 py-12 text-center text-gray-400 text-sm">{emptyMessage ?? 'No leads found.'}</div>
         ) : (
           pageItems.map((lead) => (
             <div
@@ -478,7 +570,7 @@ export default function LeadTable({ leads }: Props) {
                   {isAdmin ? (
                     <select
                       value={lead.assignedTo || 'Unassigned'}
-                      onChange={(e) => updateLead(lead.id, { assignedTo: e.target.value })}
+                      onChange={(e) => assignLead(lead.id, e.target.value)}
                       className="text-[11px] font-medium border border-gray-200 rounded-lg px-2 py-1 bg-white text-gray-700 max-w-[8rem] truncate focus:outline-none focus:ring-2 focus:ring-blue-500/40"
                     >
                       <option value="Unassigned">+ Assign</option>
@@ -510,7 +602,7 @@ export default function LeadTable({ leads }: Props) {
       <Pagination
         page={page}
         totalPages={totalPages}
-        total={filtered.length}
+        total={filteredTotal}
         pageSize={PAGE_SIZE}
         onPageChange={setPage}
       />
